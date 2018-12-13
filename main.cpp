@@ -26,9 +26,26 @@
 #include <globjects/VertexAttributeBinding.h>
 #include <globjects/Buffer.h>
 
+#include <math.h>
+
 using namespace gl;
 using namespace glm;
 using namespace globjects;
+
+class Bone 
+{
+public:
+    Bone(mat4 t);
+    mat4 transformation;
+    Bone *father;
+};
+
+Bone::Bone(mat4 t)
+{
+    transformation = t;
+}
+
+std::vector<Bone> skeleton;
 
 class MiniMesh : public globjects::Instantiator<MiniMesh>
 {
@@ -37,6 +54,9 @@ public:
     struct Vertex {
         vec3 pos;
         vec3 normal;
+        // ajout du tableau de poids
+        double weight[2];
+        vec2 weightVec;
     };
     using Face = std::array<gl::GLuint, 3>;
 
@@ -97,6 +117,13 @@ MiniMesh::MiniMesh(const std::vector<Vertex> &v, const std::vector<Face> &f):
         vertexBinding->setFormat(3, GL_FLOAT, GL_TRUE);
         m_vao->enable(1);
     }
+    {
+        auto vertexBinding = m_vao->binding(2);
+        vertexBinding->setAttribute(2);
+        vertexBinding->setBuffer(m_gpuVertices.get(), offsetof(Vertex, weightVec), sizeof(Vertex));
+        vertexBinding->setFormat(3, GL_FLOAT, GL_TRUE);
+        m_vao->enable(2);
+    }
 
     m_vao->unbind();
 }
@@ -116,7 +143,6 @@ void MiniMesh::draw(const GLenum mode)
     m_vao->unbind();
 }
 
-
 std::unique_ptr<MiniMesh> makeCylinder(vec3 base=vec3(0,0,0), vec3 axis = vec3(1,0,0), float radius = .5f, float length = 3., int subdiv1 = 64, int subdiv2 = 512){
 
     std::vector<MiniMesh::Vertex> vertices;
@@ -133,10 +159,18 @@ std::unique_ptr<MiniMesh> makeCylinder(vec3 base=vec3(0,0,0), vec3 axis = vec3(1
             float angle = 2.*glm::pi<float>()*float(j)/float(subdiv1);
             MiniMesh::Vertex nv;
             nv.pos = base+offset2*axis+radius*cos(angle)*x+radius*sin(angle)*y;
+
+            //nv.normal = vec3(1 - offset, offset, 0.f);
             nv.normal = normalize(cos(angle)*x+sin(angle)*y);
             vertices.push_back(nv);
+
+            // ajout des poids
+            vertices[vertices.size()-1].weight[0] = 1- offset;
+            vertices[vertices.size()-1].weight[1] = offset;
+            vertices[vertices.size()-1].weightVec.x = 1- offset;
+            vertices[vertices.size()-1].weightVec.y = offset;
         }
-    }
+}
 
 
     for(unsigned int i=0; i<subdiv2-1; i++)
@@ -150,10 +184,9 @@ std::unique_ptr<MiniMesh> makeCylinder(vec3 base=vec3(0,0,0), vec3 axis = vec3(1
         }
 
     }
-    
+
     return MiniMesh::create(vertices, indices);
 }
-
 
 namespace 
 {
@@ -283,6 +316,29 @@ void key_callback(GLFWwindow * window, int key, int /*scancode*/, int action, in
     }
 }
 
+void lbs(MiniMesh &m)
+{
+    mat4 blend;
+    vec4 newPos;
+    vec4 posH;
+
+    // calcul des nouvelles positions de chaque sommet
+    for (int i=0 ; i<m.restVertices().size() ; i++) {
+        blend = mat4(0.0);
+        newPos = vec4(0.0);
+        posH = vec4(m.restVertices()[i].pos, 1.0);
+
+        m.vertices()[i].normal = m.restVertices()[i].normal;
+        for (int b = 0; b<2 ; b++) {
+            m.vertices()[i].weight[b] = m.restVertices()[i].weight[b];
+            blend += (skeleton[b].transformation*(float)m.restVertices()[i].weight[b]);
+        }
+        newPos = blend * posH;
+        m.vertices()[i].pos = newPos;
+    }
+    m.updateVertices();
+}
+
 
 int main(int /*argc*/, char * /*argv*/[])
 {
@@ -323,12 +379,44 @@ int main(int /*argc*/, char * /*argv*/[])
     glfwGetFramebufferSize(window, &g_size[0], &g_size[1]);
     initialize();
 
+    float angle = 0.;
+    int sens = 0;
+    // création des os et du squelette
+    Bone B0(mat4(1.0));
+    Bone B1(mat4(1.0));
+    B0.father = nullptr;
+    B1.father = &B0;
+    skeleton.push_back(B0);
+    skeleton.push_back(B1);
+
     // Main loop
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
         draw();
         glfwSwapBuffers(window);
+        if (angle < 180 && sens == 0) {
+            ++angle;
+        }
+        if (angle == 180)
+            sens=1;
+        if (angle > 0 && sens == 1)
+            --angle;
+        if (angle == 0)
+            sens=0;
+        skeleton[0].transformation = mat4(1.0);
+        skeleton[1].transformation = mat4(1.0);
+
+        // animation B1
+        skeleton[1].transformation= glm::rotate(B1.transformation, glm::radians(angle), glm::vec3(0.0,0.0,1.0));
+
+        // intialisation des transformées --> gestion de l'hérédité
+        for (int b=0 ; b<skeleton.size() ; b++) {
+            if (skeleton[b].father != nullptr)
+                skeleton[b].transformation *= skeleton[b].father->transformation;
+        }
+
+        lbs(*g_mesh);
     }
     deinitialize();
 
@@ -337,3 +425,4 @@ int main(int /*argc*/, char * /*argv*/[])
 
     return 0;
 }
+
